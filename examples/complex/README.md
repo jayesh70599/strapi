@@ -15,34 +15,34 @@ The project includes 6 content types with different combinations of features:
 
 ## Migration Testing Workflow
 
-This project includes tools for testing migrations between Strapi v4 and v5 by creating an isolated v4 project and managing database snapshots.
+This project includes tools for testing migrations between Strapi v4 and v5 by creating an isolated v4 project and managing database snapshots. The complex example ships its own `docker-compose.dev.yml` so the database containers are independent of the monorepo root.
 
 ### Setup
 
 1. **Create/Update the external v4 project:**
 
    ```bash
-   yarn clone:v4
+   yarn setup:v4
    ```
 
-   This creates a Strapi v4 project at `../../complex-v4` (outside the monorepo) with all the same schemas.
+   This creates a Strapi v4 project outside the monorepo (default: a sibling directory named `complex-v4`). You can override the location via `V4_OUTSIDE_DIR`.
 
-2. **Navigate to the v4 project:**
+2. **Navigate to the v4 project** (use the path printed by setup):
 
    ```bash
-   cd ../../../complex-v4
+   cd <path-printed-by-setup>
    ```
 
-3. **Configure the v4 project:**
+3. **Configure the v4 project** (only if you need custom DB creds):
 
    ```bash
    cp .env.example .env
-   # Edit .env to set your database configuration
+   # Edit .env as needed
    ```
 
 4. **Start the v4 project:**
    ```bash
-   npm run develop
+   yarn develop:postgres
    ```
 
 ### Database Management
@@ -91,118 +91,85 @@ yarn db:check:postgres
 
 This displays a table showing how many records are in each table, useful for quickly seeing if the database is empty, has data, etc.
 
-#### MariaDB
+#### MySQL
 
-**Start MariaDB container:**
+**Start MySQL container:**
 
 ```bash
-yarn db:start:mariadb
+yarn db:start:mysql
 ```
 
-**Stop MariaDB container:**
+**Stop MySQL container:**
 
 ```bash
-yarn db:stop:mariadb
+yarn db:stop:mysql
 ```
 
 **Create a snapshot:**
 
 ```bash
-yarn db:snapshot:mariadb <name>
+yarn db:snapshot:mysql <name>
 ```
 
-Example: `yarn db:snapshot:mariadb mybackup`
+Example: `yarn db:snapshot:mysql mybackup`
 
 **Restore from snapshot:**
 
 ```bash
-yarn db:restore:mariadb <name>
+yarn db:restore:mysql <name>
 ```
 
-Example: `yarn db:restore:mariadb mybackup`
+Example: `yarn db:restore:mysql mybackup`
 
 **Wipe database (drop and recreate):**
 
 ```bash
-yarn db:wipe:mariadb
+yarn db:wipe:mysql
 ```
 
 **Check database (show table row counts):**
 
 ```bash
-yarn db:check:mariadb
+yarn db:check:mysql
 ```
 
 This displays a table showing how many records are in each table, useful for quickly seeing if the database is empty, has data, etc.
-
-#### SQLite
-
-**Note:** SQLite is file-based, so there's no container to start/stop.
-
-**Create a snapshot:**
-
-```bash
-yarn db:snapshot:sqlite <name>
-```
-
-Example: `yarn db:snapshot:sqlite mybackup`
-
-**Restore from snapshot:**
-
-```bash
-yarn db:restore:sqlite <name>
-```
-
-Example: `yarn db:restore:sqlite mybackup`
-
-**Wipe database (delete file):**
-
-```bash
-yarn db:wipe:sqlite
-```
-
-**Check database (show table row counts):**
-
-```bash
-yarn db:check:sqlite
-```
-
-This displays a table showing how many records are in each table, useful for quickly seeing if the database is empty, has data, etc.
-
-**Note:** SQLite check requires the `sqlite3` command-line tool. Install with:
-
-- macOS: `brew install sqlite`
-- Linux: `sudo apt-get install sqlite3`
 
 ### Typical Migration Testing Workflow
 
 1. **Setup v4 project** (if not already done):
 
    ```bash
-   yarn clone:v4
+   yarn setup:v4
    ```
 
-2. **Start v4 project** (in separate terminal):
+2. **Wipe the database** (ensures v4 format, no v5 schema):
 
    ```bash
-   cd ../../../complex-v4
-   npm run develop
+   yarn db:wipe:postgres
+   ```
+
+3. **Start v4 project** (in separate terminal, use the path printed by setup):
+
+   ```bash
+   cd <path-printed-by-setup>
+   yarn develop:postgres
    ```
 
    (v4 will automatically start its database if needed)
 
-3. **Create test data** in the v4 admin panel (manual step)
+4. **Create test data** in the v4 admin panel (manual step)
 
-4. **Create snapshot:**
+5. **Create snapshot:**
 
    ```bash
    cd examples/complex
    yarn db:snapshot:postgres mybackup
    ```
 
-5. **Stop v4 server** (Ctrl+C in v4 terminal)
+6. **Stop v4 server** (Ctrl+C in v4 terminal)
 
-6. **Start v5 server** with the same database:
+7. **Start v5 server** with the same database:
 
    ```bash
    yarn develop:postgres
@@ -210,25 +177,30 @@ This displays a table showing how many records are in each table, useful for qui
 
    Migrations will run automatically on startup.
 
-7. **Test and fix bugs** as needed
-
-8. **Restore snapshot** to reset database:
+8. **Validate migration** (no HTTP server needed):
 
    ```bash
-   yarn db:restore:postgres mybackup
+   yarn test:migration
    ```
 
-9. **Repeat from step 6** to test fixes
+9. **Test and fix bugs** as needed
 
-**Note:** The database container stays running even after stopping Strapi, so you can inspect the database or run multiple tests without restarting the container.
+10. **Restore snapshot** to reset database:
+
+```bash
+yarn db:restore:postgres mybackup
+```
+
+11. **Repeat from step 7** to test fixes
+
+**Note:** The database container stays running even after stopping Strapi, so you can inspect the database or run multiple tests without restarting the container. The complex example uses its own Compose project name (`strapi_complex`) so it does not collide with other containers.
 
 ### Snapshots
 
 Database snapshots are stored in the `snapshots/` directory:
 
 - PostgreSQL: `snapshots/postgres-<name>.sql`
-- MariaDB: `snapshots/mariadb-<name>.sql`
-- SQLite: `snapshots/sqlite-<name>.db`
+- MySQL: `snapshots/mysql-<name>.sql`
 
 Snapshots are gitignored and should not be committed to the repository.
 
@@ -244,16 +216,10 @@ The easiest way to start Strapi with a specific database:
 yarn develop:postgres
 ```
 
-**Start with MariaDB:**
+**Start with MySQL:**
 
 ```bash
-yarn develop:mariadb
-```
-
-**Start with SQLite:**
-
-```bash
-yarn develop:sqlite
+yarn develop:mysql
 ```
 
 These commands will:
@@ -263,14 +229,14 @@ These commands will:
 - ✅ Start the Strapi development server
 - ✅ Keep the database container running when you press Ctrl+C (only Strapi stops)
 
-**Note:** The database containers use non-standard ports to avoid conflicts:
+**Note:** The database containers use the standard ports by default and can be overridden:
 
-- PostgreSQL: port `5432` (instead of standard 5432)
-- MariaDB: port `3306` (instead of standard 3306)
+- PostgreSQL: port `5432` (override with `POSTGRES_PORT`)
+- MySQL: port `3306` (override with `MYSQL_PORT`)
 
 ### Standard Strapi Commands
 
-- `yarn develop` - Start development server (defaults to SQLite)
+- `yarn develop` - Start development server (defaults to PostgreSQL; requires a running DB)
 - `yarn build` - Build for production
 - `yarn start` - Start production server
 - `yarn strapi` - Run Strapi CLI commands

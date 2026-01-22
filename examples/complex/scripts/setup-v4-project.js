@@ -48,8 +48,6 @@ const CONTENT_TYPES = [
   'relation-dp-i18n',
 ];
 
-const I18N_CONTENT_TYPES = ['basic-dp-i18n', 'relation-dp-i18n'];
-
 console.log('Setting up Strapi v4 project at:', V4_PROJECT_DIR);
 console.log('⚠️  Note: This will overwrite existing files in the v4 project.\n');
 
@@ -76,17 +74,15 @@ const packageJson = {
     upgrade: 'npx @strapi/upgrade latest',
     'upgrade:dry': 'npx @strapi/upgrade latest --dry',
     'develop:postgres': 'node scripts/develop-with-db.js postgres',
-    'develop:mariadb': 'node scripts/develop-with-db.js mariadb',
-    'develop:sqlite': 'node scripts/develop-with-db.js sqlite',
-    'seed:sqlite': 'node scripts/seed-with-db.js sqlite',
+    'develop:mysql': 'node scripts/develop-with-db.js mysql',
+    seed: 'node scripts/seed.js',
     'seed:postgres': 'node scripts/seed-with-db.js postgres',
-    'seed:mariadb': 'node scripts/seed-with-db.js mariadb',
+    'seed:mysql': 'node scripts/seed-with-db.js mysql',
   },
   dependencies: {
     '@strapi/plugin-i18n': '4.26.0',
     '@strapi/plugin-users-permissions': '4.26.0',
     '@strapi/strapi': '4.26.0',
-    'better-sqlite3': '8.6.0',
     entities: '2.2.0',
     mysql2: '^3.6.0',
     pg: '^8.11.0',
@@ -124,25 +120,9 @@ if (!fs.existsSync(configDir)) {
 
 // Write database.js
 const databaseConfig = `'use strict';
-const path = require('path');
 
 module.exports = ({ env }) => {
-  const client = env('DATABASE_CLIENT', 'sqlite');
-
-  if (client === 'sqlite') {
-    return {
-      connection: {
-        client: 'sqlite',
-        connection: {
-          filename: env(
-            'DATABASE_FILENAME',
-            path.join(__dirname, '..', '.tmp', 'data.db')
-          ),
-        },
-        useNullAsDefault: true,
-      },
-    };
-  }
+  const client = env('DATABASE_CLIENT', 'postgres');
 
   if (client === 'postgres') {
     return {
@@ -511,8 +491,7 @@ TRANSFER_TOKEN_SALT=toBeModified
 JWT_SECRET=toBeModified
 
 # Database
-DATABASE_CLIENT=sqlite
-# DATABASE_CLIENT=postgres
+DATABASE_CLIENT=postgres
 # DATABASE_HOST=localhost
 # DATABASE_PORT=5432
 # DATABASE_NAME=strapi
@@ -537,165 +516,168 @@ if (!fs.existsSync(v4ScriptsDir)) {
 }
 
 // Create develop-with-db.js script for v4 project
+// TODO: consider extracting shared script templates to reduce duplication.
 const dockerComposePath = findDockerComposeFile(V4_PROJECT_DIR);
 const developWithDbScript = `#!/usr/bin/env node
 
 const { execSync, spawn } = require('child_process');
 const path = require('path');
-const fs = require('fs');
 
 const PROJECT_DIR = path.resolve(__dirname, '..');
 const DOCKER_COMPOSE_FILE = '${dockerComposePath.replace(/\\/g, '/')}';
+const COMPOSE_PROJECT_NAME = 'strapi_complex';
+const COMPOSE_ENV = { ...process.env, COMPOSE_PROJECT_NAME };
 
 const dbType = process.argv[2];
 
-if (!dbType || !['postgres', 'mariadb', 'sqlite'].includes(dbType)) {
+if (!dbType || !['postgres', 'mysql'].includes(dbType)) {
   console.error('Error: Database type is required');
-  console.error('Usage: node scripts/develop-with-db.js <postgres|mariadb|sqlite>');
+  console.error('Usage: node scripts/develop-with-db.js <postgres|mysql>');
   process.exit(1);
 }
 
-// Check if container is running
-function isContainerRunning(serviceName) {
+function getContainerId(serviceName) {
   try {
     const output = execSync(
       \`docker-compose -f \${DOCKER_COMPOSE_FILE} ps -q \${serviceName}\`,
-      { encoding: 'utf8', stdio: 'pipe', cwd: PROJECT_DIR }
+      { encoding: 'utf8', stdio: 'pipe', cwd: PROJECT_DIR, env: COMPOSE_ENV }
     ).trim();
-    if (!output) return false;
-    
-    const status = execSync(
-      \`docker inspect --format='{{.State.Running}}' \${output.split('\\n')[0]}\`,
-      { encoding: 'utf8', stdio: 'pipe' }
-    ).trim();
+    if (!output) return null;
+    return output.split('\\n')[0];
+  } catch (error) {
+    return null;
+  }
+}
+
+function isContainerRunning(serviceName) {
+  const containerId = getContainerId(serviceName);
+  if (!containerId) return false;
+  try {
+    const status = execSync(\`docker inspect --format='{{.State.Running}}' \${containerId}\`, {
+      encoding: 'utf8',
+      stdio: 'pipe',
+    }).trim();
     return status === 'true';
   } catch (error) {
     return false;
   }
 }
 
-// Check if any postgres container is running on port 5432
-function findRunningPostgresContainer() {
-  try {
-    const output = execSync(
-      \`docker ps --filter "publish=5432" --filter "ancestor=postgres" --format "{{.Names}}"\`,
-      { encoding: 'utf8', stdio: 'pipe' }
-    ).trim();
-    if (output) {
-      return output.split('\\n')[0];
-    }
-  } catch (error) {
-    // Ignore errors
+function assertPostgresReady() {
+  const containerId = getContainerId('postgres');
+  if (!containerId) {
+    throw new Error('Postgres container not found. Start it and try again.');
   }
-  return null;
+  try {
+    execSync(\`docker exec \${containerId} pg_isready -U strapi\`, { stdio: 'ignore' });
+  } catch (error) {
+    throw new Error('Postgres is not ready yet. Wait for it to be ready and retry.');
+  }
 }
 
-// Start container if not running
-function ensureContainerRunning(serviceName) {
-  // For postgres, check if there's already a container running on port 5432
-  if (serviceName === 'postgres') {
-    const existingContainer = findRunningPostgresContainer();
-    if (existingContainer) {
-      console.log(\`✅ Using existing postgres container: \${existingContainer}\`);
-      return;
-    }
+function assertMysqlReady() {
+  const containerId = getContainerId('mysql');
+  if (!containerId) {
+    throw new Error('MySQL container not found. Start it and try again.');
   }
-  
+  try {
+    execSync(\`docker exec \${containerId} mysqladmin ping -u strapi -pstrapi --silent\`, {
+      stdio: 'ignore',
+    });
+  } catch (error) {
+    throw new Error('MySQL is not ready yet. Wait for it to be ready and retry.');
+  }
+}
+
+function ensureContainerRunning(serviceName) {
   if (isContainerRunning(serviceName)) {
     console.log(\`✅ \${serviceName} container is already running\`);
+    if (dbType === 'postgres') assertPostgresReady();
+    if (dbType === 'mysql') assertMysqlReady();
     return;
   }
-  
+
   console.log(\`Starting \${serviceName} container...\`);
   try {
     execSync(\`docker-compose -f \${DOCKER_COMPOSE_FILE} up -d \${serviceName}\`, {
       cwd: PROJECT_DIR,
       stdio: 'inherit',
+      env: COMPOSE_ENV,
     });
     console.log(\`✅ \${serviceName} container started\`);
-    
-    // Wait a bit for the database to be ready
-    if (dbType === 'postgres' || dbType === 'mariadb') {
-      console.log('Waiting for database to be ready...');
-      const start = Date.now();
-      while (Date.now() - start < 3000) {
-        // Blocking wait
-      }
-    }
+    if (dbType === 'postgres') assertPostgresReady();
+    if (dbType === 'mysql') assertMysqlReady();
   } catch (error) {
     console.error(\`Error starting \${serviceName} container: \${error.message}\`);
     process.exit(1);
   }
 }
 
-// Set up environment variables based on database type
 function getEnvVars() {
   const env = { ...process.env };
-  
+
   switch (dbType) {
-    case 'postgres':
+    case 'postgres': {
+      const postgresPort = process.env.POSTGRES_PORT || '5432';
+      const databasePort = process.env.DATABASE_PORT || postgresPort;
       env.DATABASE_CLIENT = 'postgres';
       env.DATABASE_HOST = 'localhost';
-      env.DATABASE_PORT = '5432';
+      env.DATABASE_PORT = databasePort;
       env.DATABASE_NAME = 'strapi';
       env.DATABASE_USERNAME = 'strapi';
       env.DATABASE_PASSWORD = 'strapi';
       env.DATABASE_SSL = 'false';
       break;
-      
-    case 'mariadb':
+    }
+    case 'mysql': {
+      const mysqlPort = process.env.MYSQL_PORT || '3306';
+      const databasePort = process.env.DATABASE_PORT || mysqlPort;
       env.DATABASE_CLIENT = 'mysql';
       env.DATABASE_HOST = 'localhost';
-      env.DATABASE_PORT = '3306';
+      env.DATABASE_PORT = databasePort;
       env.DATABASE_NAME = 'strapi';
       env.DATABASE_USERNAME = 'strapi';
       env.DATABASE_PASSWORD = 'strapi';
       env.DATABASE_SSL = 'false';
       break;
-      
-    case 'sqlite':
-      env.DATABASE_CLIENT = 'sqlite';
-      break;
+    }
   }
-  
+
   return env;
 }
 
-// Start Strapi develop
 function startStrapi() {
   if (dbType === 'postgres') {
     ensureContainerRunning('postgres');
-  } else if (dbType === 'mariadb') {
+  } else if (dbType === 'mysql') {
     ensureContainerRunning('mysql');
   }
-  
+
   const env = getEnvVars();
-  
+
   console.log(\`\\n🚀 Starting Strapi with \${dbType} database...\\n\`);
-  
-  // Spawn strapi develop process
+
   const isWindows = process.platform === 'win32';
-  const strapiProcess = spawn(isWindows ? 'npm.cmd' : 'npm', ['run', 'develop'], {
+  const strapiProcess = spawn(isWindows ? 'yarn.cmd' : 'yarn', ['develop'], {
     cwd: PROJECT_DIR,
     env,
     stdio: 'inherit',
     shell: !isWindows,
   });
-  
-  // Handle process termination
+
   let isShuttingDown = false;
-  
+
   const cleanup = () => {
     if (isShuttingDown) return;
     isShuttingDown = true;
-    
+
     console.log('\\n\\n⏹️  Stopping Strapi server (database container will keep running)...');
     strapiProcess.kill('SIGINT');
-    
+
     strapiProcess.on('exit', () => {
       process.exit(0);
     });
-    
+
     setTimeout(() => {
       if (!strapiProcess.killed) {
         strapiProcess.kill('SIGKILL');
@@ -703,16 +685,16 @@ function startStrapi() {
       }
     }, 5000);
   };
-  
+
   process.on('SIGINT', cleanup);
   process.on('SIGTERM', cleanup);
-  
+
   strapiProcess.on('exit', (code) => {
     if (!isShuttingDown) {
       process.exit(code || 0);
     }
   });
-  
+
   strapiProcess.on('error', (error) => {
     console.error('Error starting Strapi:', error);
     process.exit(1);
@@ -733,7 +715,7 @@ try {
 console.log('✅ Created database development scripts');
 
 // Copy seed script (always overwrite)
-const seedScriptSource = path.join(SCRIPT_DIR, 'seed-v4-template.js');
+const seedScriptSource = path.join(SCRIPT_DIR, 'seed-v4.js');
 const seedScriptDest = path.join(v4ScriptsDir, 'seed.js');
 fs.copyFileSync(seedScriptSource, seedScriptDest);
 try {
@@ -751,140 +733,143 @@ const path = require('path');
 
 const PROJECT_DIR = path.resolve(__dirname, '..');
 const DOCKER_COMPOSE_FILE = '${dockerComposePath.replace(/\\/g, '\\\\')}';
+const COMPOSE_PROJECT_NAME = 'strapi_complex';
+const COMPOSE_ENV = { ...process.env, COMPOSE_PROJECT_NAME };
 
 const dbType = process.argv[2];
-// Skip '--' if present (yarn passes it as an argument separator)
 let multiplierArgIndex = 3;
 if (process.argv[multiplierArgIndex] === '--') {
   multiplierArgIndex = 4;
 }
 const multiplier = process.argv[multiplierArgIndex] || '1';
 
-if (!dbType || !['postgres', 'mariadb', 'sqlite'].includes(dbType)) {
+if (!dbType || !['postgres', 'mysql'].includes(dbType)) {
   console.error('Error: Database type is required');
-  console.error('Usage: node scripts/seed-with-db.js <postgres|mariadb|sqlite> [multiplier]');
+  console.error('Usage: node scripts/seed-with-db.js <postgres|mysql> [multiplier]');
   process.exit(1);
 }
 
-// Check if container is running
-function isContainerRunning(serviceName) {
+function getContainerId(serviceName) {
   try {
     const output = execSync(
       \`docker-compose -f \${DOCKER_COMPOSE_FILE} ps -q \${serviceName}\`,
-      { encoding: 'utf8', stdio: 'pipe', cwd: PROJECT_DIR }
+      { encoding: 'utf8', stdio: 'pipe', cwd: PROJECT_DIR, env: COMPOSE_ENV }
     ).trim();
-    if (!output) return false;
-    
-    const status = execSync(
-      \`docker inspect --format='{{.State.Running}}' \${output.split('\\n')[0]}\`,
-      { encoding: 'utf8', stdio: 'pipe' }
-    ).trim();
+    if (!output) return null;
+    return output.split('\\n')[0];
+  } catch (error) {
+    return null;
+  }
+}
+
+function isContainerRunning(serviceName) {
+  const containerId = getContainerId(serviceName);
+  if (!containerId) return false;
+  try {
+    const status = execSync(\`docker inspect --format='{{.State.Running}}' \${containerId}\`, {
+      encoding: 'utf8',
+      stdio: 'pipe',
+    }).trim();
     return status === 'true';
   } catch (error) {
     return false;
   }
 }
 
-// Check if any postgres container is running on port 5432
-function findRunningPostgresContainer() {
-  try {
-    const output = execSync(
-      \`docker ps --filter "publish=5432" --filter "ancestor=postgres" --format "{{.Names}}"\`,
-      { encoding: 'utf8', stdio: 'pipe' }
-    ).trim();
-    if (output) {
-      return output.split('\\n')[0];
-    }
-  } catch (error) {
-    // Ignore errors
+function assertPostgresReady() {
+  const containerId = getContainerId('postgres');
+  if (!containerId) {
+    throw new Error('Postgres container not found. Start it and try again.');
   }
-  return null;
+  try {
+    execSync(\`docker exec \${containerId} pg_isready -U strapi\`, { stdio: 'ignore' });
+  } catch (error) {
+    throw new Error('Postgres is not ready yet. Wait for it to be ready and retry.');
+  }
 }
 
-// Start container if not running
-function ensureContainerRunning(serviceName) {
-  // For postgres, check if there's already a container running on port 5432
-  if (serviceName === 'postgres') {
-    const existingContainer = findRunningPostgresContainer();
-    if (existingContainer) {
-      console.log(\`✅ Using existing postgres container: \${existingContainer}\`);
-      return;
-    }
+function assertMysqlReady() {
+  const containerId = getContainerId('mysql');
+  if (!containerId) {
+    throw new Error('MySQL container not found. Start it and try again.');
   }
-  
+  try {
+    execSync(\`docker exec \${containerId} mysqladmin ping -u strapi -pstrapi --silent\`, {
+      stdio: 'ignore',
+    });
+  } catch (error) {
+    throw new Error('MySQL is not ready yet. Wait for it to be ready and retry.');
+  }
+}
+
+function ensureContainerRunning(serviceName) {
   if (isContainerRunning(serviceName)) {
     console.log(\`✅ \${serviceName} container is already running\`);
+    if (dbType === 'postgres') assertPostgresReady();
+    if (dbType === 'mysql') assertMysqlReady();
     return;
   }
-  
+
   console.log(\`Starting \${serviceName} container...\`);
   try {
     execSync(\`docker-compose -f \${DOCKER_COMPOSE_FILE} up -d \${serviceName}\`, {
       cwd: PROJECT_DIR,
       stdio: 'inherit',
+      env: COMPOSE_ENV,
     });
     console.log(\`✅ \${serviceName} container started\`);
-    
-    // Wait a bit for the database to be ready
-    if (dbType === 'postgres' || dbType === 'mariadb') {
-      console.log('Waiting for database to be ready...');
-      const start = Date.now();
-      while (Date.now() - start < 3000) {
-        // Blocking wait
-      }
-    }
+    if (dbType === 'postgres') assertPostgresReady();
+    if (dbType === 'mysql') assertMysqlReady();
   } catch (error) {
     console.error(\`Error starting \${serviceName} container: \${error.message}\`);
     process.exit(1);
   }
 }
 
-// Set up environment variables based on database type
 function getEnvVars() {
   const env = { ...process.env };
-  
+
   switch (dbType) {
-    case 'postgres':
+    case 'postgres': {
+      const postgresPort = process.env.POSTGRES_PORT || '5432';
+      const databasePort = process.env.DATABASE_PORT || postgresPort;
       env.DATABASE_CLIENT = 'postgres';
       env.DATABASE_HOST = 'localhost';
-      env.DATABASE_PORT = '5432';
+      env.DATABASE_PORT = databasePort;
       env.DATABASE_NAME = 'strapi';
       env.DATABASE_USERNAME = 'strapi';
       env.DATABASE_PASSWORD = 'strapi';
       env.DATABASE_SSL = 'false';
       break;
-      
-    case 'mariadb':
+    }
+    case 'mysql': {
+      const mysqlPort = process.env.MYSQL_PORT || '3306';
+      const databasePort = process.env.DATABASE_PORT || mysqlPort;
       env.DATABASE_CLIENT = 'mysql';
       env.DATABASE_HOST = 'localhost';
-      env.DATABASE_PORT = '3306';
+      env.DATABASE_PORT = databasePort;
       env.DATABASE_NAME = 'strapi';
       env.DATABASE_USERNAME = 'strapi';
       env.DATABASE_PASSWORD = 'strapi';
       env.DATABASE_SSL = 'false';
       break;
-      
-    case 'sqlite':
-      env.DATABASE_CLIENT = 'sqlite';
-      break;
+    }
   }
-  
+
   return env;
 }
 
-// Run seed script
 function runSeed() {
   if (dbType === 'postgres') {
     ensureContainerRunning('postgres');
-  } else if (dbType === 'mariadb') {
+  } else if (dbType === 'mysql') {
     ensureContainerRunning('mysql');
   }
-  
+
   const env = getEnvVars();
-  
+
   console.log(\`\\n🌱 Seeding database (\${dbType}) with multiplier: \${multiplier}...\\n\`);
-  
-  // Spawn seed script process
+
   const isWindows = process.platform === 'win32';
   const seedProcess = spawn(isWindows ? 'node.exe' : 'node', ['scripts/seed.js', multiplier], {
     cwd: PROJECT_DIR,
@@ -892,11 +877,11 @@ function runSeed() {
     stdio: 'inherit',
     shell: !isWindows,
   });
-  
+
   seedProcess.on('exit', (code) => {
     process.exit(code || 0);
   });
-  
+
   seedProcess.on('error', (error) => {
     console.error('Error running seed script:', error);
     process.exit(1);
@@ -920,4 +905,4 @@ console.log('\nNext steps:');
 console.log('1. cd ../../../complex-v4');
 console.log('2. yarn install (install dependencies)');
 console.log('3. Edit .env file if needed (app keys will be auto-generated)');
-console.log('4. npm run develop:postgres (or develop:mariadb, develop:sqlite)');
+console.log('4. yarn develop:postgres (or develop:mysql)');
